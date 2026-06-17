@@ -12,11 +12,13 @@ use crate::ext::aligned_vec::ACow;
 use crate::generic_consts::{AccessPattern, Sequential};
 use crate::mmap::AdviceSetting;
 use crate::universal_io::simple_disk_cache::local_state::LocalState;
-use crate::universal_io::simple_disk_cache::pipeline::{DiskCachePipeline, OwnedDiskCachePipeline};
-use crate::universal_io::simple_disk_cache::{DiskCacheRemote, to_block_range};
+use crate::universal_io::simple_disk_cache::pipeline::DiskCachePipeline;
+use crate::universal_io::simple_disk_cache::{
+    DiskCacheRemote, OwnedRemotePipeline, to_block_range,
+};
 use crate::universal_io::{
-    BorrowedReadPipeline, OpenOptions, OwnedReadPipeline, Populate, ReadRange, Result,
-    UniversalIoError, UniversalKind, UniversalRead, UniversalReadFs, UserData,
+    OpenOptions, Populate, ReadPipelineImpl, ReadRange, Result, UniversalIoError, UniversalKind,
+    UniversalRead, UniversalReadFs, UserData,
 };
 
 /// A lazily-populated local mirror of an immutable remote file.
@@ -31,7 +33,7 @@ use crate::universal_io::{
 /// Initializing multiple instances will try to re-read from remote.
 pub struct DiskCache<R>
 where
-    R: UniversalRead,
+    R: UniversalRead + 'static,
 {
     /// Clone of the remote filesystem handle, used to lazily open `remote`.
     remote_fs: R::Fs,
@@ -56,7 +58,7 @@ where
 
 impl<R> Debug for DiskCache<R>
 where
-    R: UniversalRead,
+    R: UniversalRead + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiskCache")
@@ -70,11 +72,11 @@ where
 }
 
 /// Where the [`LocalState`] comes from on first init.
-pub(super) enum InitSource<R: UniversalRead> {
+pub(super) enum InitSource<R: UniversalRead + 'static> {
     /// Build an empty local mmap and let reads fill blocks on demand.
     FromScratch,
     /// Wait for the prefill pipeline.
-    FromPrefiller(R::OwnedReadPipeline<()>),
+    FromPrefiller(OwnedRemotePipeline<R, ()>),
 }
 
 impl<R> DiskCache<R>
@@ -241,16 +243,11 @@ where
 {
     type Fs = DiskCacheFs<R>;
 
-    type BorrowedReadPipeline<'a, U>
+    type ReadPipeline<'a, U>
         = DiskCachePipeline<'a, R, U>
     where
         R: 'a,
         Self: 'a,
-        U: UserData;
-
-    type OwnedReadPipeline<U>
-        = OwnedDiskCachePipeline<R, U>
-    where
         U: UserData;
 
     fn reopen(&mut self) -> Result<()> {

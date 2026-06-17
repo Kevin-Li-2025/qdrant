@@ -1,4 +1,3 @@
-use std::mem::ManuallyDrop;
 use std::ops::Range;
 
 use ::io_uring::types::Fd;
@@ -6,144 +5,31 @@ use ::io_uring::types::Fd;
 use super::pool::IO_URING_QUEUE_LENGTH;
 use super::{IoUringFile, IoUringRuntime};
 use crate::ext::aligned_vec::ACow;
-use crate::generic_consts::{AccessPattern, Sequential};
-use crate::universal_io::{
-    BorrowedReadPipeline, OwnedReadPipeline, Result, UniversalIoError, UniversalRead, UserData,
-};
+use crate::generic_consts::AccessPattern;
+use crate::universal_io::{ReadPipelineImpl, Result, UniversalIoError, UserData};
 
-pub struct BorrowedIoUringPipeline<'file, U>
-where
-    U: UserData,
-{
-    inner: IoUringPipelineInner<'file, U>,
-}
-
-impl<'file, U> BorrowedReadPipeline<'file, U> for BorrowedIoUringPipeline<'file, U>
-where
-    U: UserData,
-{
-    type File = IoUringFile;
-
-    fn new() -> Result<Self> {
-        Ok(Self {
-            inner: IoUringPipelineInner::new()?,
-        })
-    }
-
-    fn can_schedule(&mut self) -> bool {
-        self.inner.can_schedule()
-    }
-
-    fn schedule<P: AccessPattern>(
-        &mut self,
-        user_data: U,
-        file: &'file IoUringFile,
-        range: Range<u64>,
-        align: usize,
-    ) -> Result<()> {
-        // Safety: `file.fd()` doesn't outlive the inner pipeline because of
-        // `'file` lifetime.
-        unsafe {
-            self.inner
-                .schedule(user_data, file.fd(), file.direct_io, range, align)
-        }
-    }
-
-    fn wait(&mut self) -> Result<Option<(U, ACow<'file>)>> {
-        self.inner.wait()
-    }
-}
-
-pub struct OwnedIoUringPipeline<U>
-where
-    U: UserData,
-{
-    file: ManuallyDrop<IoUringFile>,
-    inner: ManuallyDrop<IoUringPipelineInner<'static, U>>,
-}
-
-impl<U> OwnedReadPipeline<U> for OwnedIoUringPipeline<U>
-where
-    U: UserData,
-{
-    type File = IoUringFile;
-
-    fn new(file: IoUringFile) -> Result<Self> {
-        let inner = IoUringPipelineInner::new()?;
-        Ok(Self {
-            file: ManuallyDrop::new(file),
-            inner: ManuallyDrop::new(inner),
-        })
-    }
-
-    fn can_schedule(&mut self) -> bool {
-        self.inner.can_schedule()
-    }
-
-    fn schedule<P: AccessPattern>(
-        &mut self,
-        user_data: U,
-        range: Range<u64>,
-        align: usize,
-    ) -> Result<()> {
-        // Safety: `self.file.fd()` doesn't outlive the inner pipeline because
-        // of explicit drop order in `impl Drop`.
-        unsafe {
-            self.inner
-                .schedule(user_data, self.file.fd(), self.file.direct_io, range, align)
-        }
-    }
-
-    fn schedule_whole(&mut self, user_data: U) -> Result<()> {
-        let length = self.file.len::<u8>()?;
-        self.schedule::<Sequential>(user_data, 0..length, 1)
-    }
-
-    fn wait(&mut self) -> Result<Option<(U, ACow<'_>)>> {
-        self.inner.wait()
-    }
-}
-
-impl<U> Drop for OwnedIoUringPipeline<U>
-where
-    U: UserData,
-{
-    fn drop(&mut self) {
-        // Drop `inner` before `file`.
-        let Self { file, inner } = self;
-        let file: IoUringFile = unsafe { ManuallyDrop::take(file) };
-        let inner: IoUringPipelineInner<_> = unsafe { ManuallyDrop::take(inner) };
-        drop(inner);
-        drop(file);
-    }
-}
-
-struct IoUringPipelineInner<'file, U>
+/// io_uring read pipeline.
+///
+/// Reads always produce *owned* (`AVec`) buffers, so the `'file` lifetime never
+/// bounds returned data — it is purely a file-safety guard ensuring the file's
+/// fd outlives all in-flight operations (the runtime drains them on drop). The
+/// file-owning variant is provided generically by
+/// [`OwningPipeline`](crate::universal_io::OwningPipeline).
+pub struct IoUringPipeline<'file, U>
 where
     U: UserData,
 {
     runtime: IoUringRuntime<'file, U>,
 }
 
-impl<'file, U> IoUringPipelineInner<'file, U>
+impl<'file, U> IoUringPipeline<'file, U>
 where
     U: UserData,
 {
-    fn new() -> Result<Self> {
-        Ok(Self {
-            runtime: IoUringRuntime::new()?,
-        })
-    }
-
-    fn can_schedule(&mut self) -> bool {
-        let squeue = self.runtime.io_uring.submission();
-        self.runtime.in_progress + squeue.len() < IO_URING_QUEUE_LENGTH as _
-    }
-
     /// # Safety
     ///
     /// The caller must ensure that the `fd` will not outlive the pipeline.
-    unsafe fn schedule(
+    unsafe fn schedule_fd(
         &mut self,
         user_data: U,
         fd: Fd,
@@ -167,6 +53,36 @@ where
         }
 
         Ok(())
+    }
+}
+
+impl<'file, U> ReadPipelineImpl<'file, U> for IoUringPipeline<'file, U>
+where
+    U: UserData,
+{
+    type File = IoUringFile;
+
+    fn new() -> Result<Self> {
+        Ok(Self {
+            runtime: IoUringRuntime::new()?,
+        })
+    }
+
+    fn can_schedule(&mut self) -> bool {
+        let squeue = self.runtime.io_uring.submission();
+        self.runtime.in_progress + squeue.len() < IO_URING_QUEUE_LENGTH as _
+    }
+
+    fn schedule<P: AccessPattern>(
+        &mut self,
+        user_data: U,
+        file: &'file IoUringFile,
+        range: Range<u64>,
+        align: usize,
+    ) -> Result<()> {
+        // SAFETY: `file` outlives the pipeline (`'file`), so `file.fd()` will not
+        // outlive any in-flight operation scheduled here.
+        unsafe { self.schedule_fd(user_data, file.fd(), file.direct_io, range, align) }
     }
 
     fn wait(&mut self) -> Result<Option<(U, ACow<'file>)>> {

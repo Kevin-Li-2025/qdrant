@@ -2,16 +2,17 @@ use std::ops::Range;
 
 use super::{MmapFile, read_bytes};
 use crate::ext::aligned_vec::ACow;
-use crate::generic_consts::{AccessPattern, Random, Sequential};
-use crate::universal_io::{
-    BorrowedReadPipeline, OwnedReadPipeline, Result, UniversalIoError, UniversalRead, UserData,
-};
+use crate::generic_consts::AccessPattern;
+use crate::universal_io::{ReadPipelineImpl, Result, UniversalIoError, UserData};
 
-pub struct BorrowedMmapReadPipeline<'file, U> {
+/// Synchronous, zero-copy mmap read pipeline. Reads resolve immediately at
+/// `schedule` time and borrow directly from the mmap (`'file`); the queue holds
+/// at most one pending result.
+pub struct MmapReadPipeline<'file, U> {
     result: Option<(U, &'file [u8])>,
 }
 
-impl<'file, U> BorrowedReadPipeline<'file, U> for BorrowedMmapReadPipeline<'file, U>
+impl<'file, U> ReadPipelineImpl<'file, U> for MmapReadPipeline<'file, U>
 where
     U: UserData,
 {
@@ -43,60 +44,5 @@ where
     fn wait(&mut self) -> Result<Option<(U, ACow<'file>)>> {
         let result = self.result.take();
         Ok(result.map(|(user_data, bytes)| (user_data, ACow::Borrowed(bytes))))
-    }
-}
-
-#[derive(Debug)]
-pub struct OwnedMmapReadPipeline<U> {
-    file: MmapFile,
-    pending: Option<(U, Range<u64>, bool)>,
-}
-
-impl<U> OwnedReadPipeline<U> for OwnedMmapReadPipeline<U>
-where
-    U: UserData,
-{
-    type File = MmapFile;
-
-    fn new(file: MmapFile) -> Result<Self> {
-        Ok(Self {
-            file,
-            pending: None,
-        })
-    }
-
-    fn can_schedule(&mut self) -> bool {
-        self.pending.is_none()
-    }
-
-    fn schedule<P: AccessPattern>(
-        &mut self,
-        user_data: U,
-        range: Range<u64>,
-        _align: usize,
-    ) -> Result<()> {
-        if self.pending.is_some() {
-            return Err(UniversalIoError::QueueIsFull);
-        }
-        self.pending = Some((user_data, range, P::IS_SEQUENTIAL));
-        Ok(())
-    }
-
-    fn schedule_whole(&mut self, user_data: U) -> Result<()> {
-        let length = self.file.len::<u8>()?;
-        self.schedule::<Sequential>(user_data, 0..length, 1)
-    }
-
-    fn wait(&mut self) -> Result<Option<(U, ACow<'_>)>> {
-        let Some((user_data, range, is_sequential)) = self.pending.take() else {
-            return Ok(None);
-        };
-        let bytes = if is_sequential {
-            self.file.as_bytes::<Sequential>()
-        } else {
-            self.file.as_bytes::<Random>()
-        };
-        let slice = read_bytes(bytes, range)?;
-        Ok(Some((user_data, ACow::Borrowed(slice))))
     }
 }

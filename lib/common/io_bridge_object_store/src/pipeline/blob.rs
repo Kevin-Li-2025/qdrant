@@ -3,22 +3,25 @@ use std::ops::Range;
 
 use common::ext::aligned_vec::ACow;
 use common::generic_consts::AccessPattern;
-use common::universal_io::{BorrowedReadPipeline, Result, UserData};
+use common::universal_io::{ReadPipelineImpl, Result, UserData};
 
 use super::buffer::read_into_byte_buffer;
 use super::inner::PipelineInner;
 use crate::file::BlobFile;
 use crate::read::AsyncRead;
 
-/// `BorrowedReadPipeline` impl over a [`BlobFile`]. Lazy: no channel / map is
-/// allocated until the first `schedule` call, so creating one is cheap even
-/// if the caller ends up not issuing any reads.
-pub struct BorrowedBlobPipeline<'file, A: AsyncRead, U> {
+/// [`ReadPipelineImpl`] over a [`BlobFile`].
+///
+/// Reads always produce *owned* buffers (the async worker streams into a fresh
+/// `AVec`), so the `'file` lifetime is purely a file-safety guard. Lazy: no
+/// channel / slab is allocated until the first `schedule` call, so creating one
+/// is cheap even if the caller ends up not issuing any reads.
+pub struct BlobReadPipeline<'file, A: AsyncRead, U> {
     inner: Option<PipelineInner<U>>,
     _phantom: PhantomData<&'file BlobFile<A>>,
 }
 
-impl<'file, A, U> BorrowedReadPipeline<'file, U> for BorrowedBlobPipeline<'file, A, U>
+impl<'file, A, U> ReadPipelineImpl<'file, U> for BlobReadPipeline<'file, A, U>
 where
     A: AsyncRead,
     U: UserData,

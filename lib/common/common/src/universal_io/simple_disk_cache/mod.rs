@@ -13,23 +13,34 @@ pub use config::DiskCacheConfig;
 pub use file::DiskCache;
 pub use fs::{DiskCacheFs, DiskCacheFsContext};
 
-use crate::universal_io::{UniversalRead, UniversalReadFs};
+use crate::universal_io::{OwningPipeline, UniversalRead, UniversalReadFs};
+
+/// The file-owning remote pipeline used to prefill a [`DiskCache`] from its
+/// remote. Derived generically from the remote's single
+/// [`ReadPipeline`](UniversalRead::ReadPipeline).
+pub(super) type OwnedRemotePipeline<R, U> =
+    OwningPipeline<<R as UniversalRead>::ReadPipeline<'static, U>, R, U>;
 
 /// Trait bundle for remote backends that can be cached by [`DiskCache`].
+///
+/// The `ReadPipeline<'static, ()>: Send` and `Send` supertrait bounds together
+/// make [`OwnedRemotePipeline<Self, ()>`] `Send`, as required to store the
+/// prefiller inside the shared [`DiskCache`].
 pub trait DiskCacheRemote:
     UniversalRead<
         Fs: Clone + Send + Sync + UniversalReadFs<OpenExtra: Clone + Send + Sync>,
-        OwnedReadPipeline<()>: Send,
+        ReadPipeline<'static, ()>: Send,
     > + Clone
+    + Send
+    + 'static
 {
 }
 
 impl<R> DiskCacheRemote for R
 where
-    R: UniversalRead + Clone,
+    R: UniversalRead<ReadPipeline<'static, ()>: Send> + Clone + Send + 'static,
     R::Fs: Clone + Send + Sync,
     <R::Fs as UniversalReadFs>::OpenExtra: Clone + Send + Sync,
-    R::OwnedReadPipeline<()>: Send,
 {
 }
 

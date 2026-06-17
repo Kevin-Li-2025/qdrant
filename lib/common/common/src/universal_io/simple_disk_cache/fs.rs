@@ -2,12 +2,12 @@ use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::DiskCacheRemote;
 use super::config::DiskCacheConfig;
 use super::file::{DiskCache, InitSource};
+use super::{DiskCacheRemote, OwnedRemotePipeline};
 use crate::mmap::AdviceSetting;
 use crate::universal_io::{
-    OpenExtra, OpenOptions, OwnedReadPipeline, Populate, Result, UniversalIoError, UniversalRead,
+    OpenExtra, OpenOptions, Populate, Result, UniversalIoError, UniversalRead,
     UniversalReadFileOps, UniversalReadFs,
 };
 
@@ -150,7 +150,7 @@ where
                     extra.clone(),
                 )?;
 
-                let mut pipeline = R::OwnedReadPipeline::new(remote)?;
+                let mut pipeline = OwnedRemotePipeline::<R, ()>::new(remote)?;
 
                 // FIXME: check `can_schedule` in a loop first
                 pipeline.schedule_whole(())?;
